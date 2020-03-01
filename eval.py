@@ -19,40 +19,10 @@ import torchvision.models as models
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 import os.path as osp
-from torch.autograd import Variable
+from toch.rautograd import Variable
 import math
 from networks.resnet import resnet50, resnet101
 from dataset.dataset import VeriDataset
-
-"""
-此文件用于训练模型后，对模型在测试集上的表现进行评估。具体方法为：
-1. 利用训练好的模型来分别提取image_query目录中的所有查询图像的特征，和image_test目录中所有测试集图像的特征，对于每一张图片，提取出来特征
-   的维度为1x2048
-2. 利用距离公式对于每一张要查询的图像，依次计算该查询图像与每一张测试集图像(image gallery)特征间的距离，得到一个距离矩阵，因为本数据集中
-   共有1678个查询图像，和11579个测试图像，所以得到距离矩阵的维度为1678 x 11579
-3. 对得到的距离矩阵进行排序，得到前K个与该查询图像距离相近的测试集图像
-4. 根据步骤3中所得到的结果计算mAP和CMC等结果
-
-这里用户需要提供4个必要参数：
-- querypath: 查询图片文件存储的路径
-- querylist: txt文件的路径，里面存储query数据中包含的图片的id
-- gallerypath: 测试集图片文件存储的路径
-- gallerylist: txt文件的路径，里面存储测试集数据中包含的图片的id
-
-剩下的为选择性参数，如果用户不提供，则采用默认值：
-- dataset: 数据集的类型，默认为Veri (Vehicle Re-identification) 数据集
-- workers: 指定workers的数量来处理数据
-- batch_size: 批处理的大小
-- num_classes: 有多少种labels
-- backbone: 采用什么模型， 默认为resnet50
-- weights： 模型的权重（如果有，则提供该权重的存储路径）
-- scale-size： 模型scale后的大小
-- write-out： 是否保存输出
-- crop_size: 模型裁剪后的大小
-- epochs: 模型要训练的次数
-- save_dir: 模型评估后结果保存的路径
-- topK: 保留前K个与查询图像相近的测试集图像
-"""
 
 
 parser = argparse.ArgumentParser(description='PyTorch Relationship')
@@ -84,9 +54,6 @@ parser.add_argument('--TopK',default=100, type=int,
                    
 
 def get_dataset(dataset_name, query_dir, query_list, gallery_dir, gallery_list):
-    """:
-    根据用户指定的查询图像路径和测试集图像路径，分别创建dataloader来读取相应数据
-    """
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
     scale_size = args.scale_size
@@ -193,7 +160,7 @@ def evaluate(query_loader, gallery_loader, model):
         gallery_camids.append(camid)
         image = torch.autograd.Variable(image).cuda()
         output, feat = model(image)
-        gallery_feats.append(feat.data.cpu())
+        gallery_feats.append(feat.data.cpu()) #把所有特征向量存储在列表中
         galleryN = galleryN+1
 
     gallery_time = time.time()-end
@@ -208,7 +175,7 @@ def evaluate(query_loader, gallery_loader, model):
 
 def compute(query_feats, query_pids, query_camids, gallery_feats, gallery_pids, gallery_camids):
     # query
-    qf = torch.cat(query_feats, dim=0)
+    qf = torch.cat(query_feats, dim=0) #把所有图片的特征向量组织成二维张量，每一行代表一张图片的特征
 
     q_pids = np.asarray(query_pids)
     q_camids = np.asarray(query_camids).T
@@ -224,6 +191,11 @@ def compute(query_feats, query_pids, query_camids, gallery_feats, gallery_pids, 
     print('Saving feature mat...')
     np.save(args.save_dir+'queryFeat.npy', qf)
     np.save(args.save_dir+'galleryFeat.npy', gf)
+    '''
+    距离计算方法：欧式距离，（x-y）的平方
+    distmat先算出x的平方和y的平方之和，再减去2*x*y
+    最后算出距离矩阵是m*n维，每行表示一张待查询图像与库中gallery中的所有图像的距离
+    '''
     distmat = torch.pow(qf, 2).sum(dim=1, keepdim=True).expand(m, n) + torch.pow(gf, 2).sum(dim=1, keepdim=True).expand(n, m).t()
     distmat.addmm_(1, -2, qf, gf.t())
     distmat = distmat.cpu().numpy()
@@ -245,7 +217,7 @@ def eval_func(distmat, q_pids, g_pids, q_camids, g_camids, max_rank=100):
         max_rank = num_g
         print("Note: number of gallery samples is quite small, got {}".format(num_g))
     indices = np.argsort(distmat, axis=1)
-    matches = (g_pids[indices] == q_pids[:, np.newaxis]).astype(np.int32)
+    matches = (g_pids[indices] == q_pids[:, np.newaxis]).astype(np.int32) #匹配矩阵，为True则是pid相同
     print('Saving resulting indexes...', indices.shape)
     np.save(args.save_dir+'result.npy', indices[:, :args.TopK]+1)
     np.savetxt(args.save_dir+'result.txt', indices[:, :args.TopK]+1, fmt='%d')
@@ -267,6 +239,7 @@ def eval_func(distmat, q_pids, g_pids, q_camids, g_camids, max_rank=100):
         # compute cmc curve
         # binary vector, positions with value 1 are correct matches
         orig_cmc = matches[q_idx][keep]
+        #如果前q_idx一个都没有，就跳出本次循环
         if not np.any(orig_cmc):
             # this condition is true when query identity does not appear in gallery
             continue

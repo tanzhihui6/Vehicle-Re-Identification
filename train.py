@@ -1,18 +1,18 @@
-import argparse
-import os, sys
-import shutil
-import time
+import argparse      #命令行解释器
+import os, sys       #操作
+import shutil        #文件高级操作
+import time          #时间模块
 import numpy as np
 import os
 import torch
 import torch.nn as nn
 import torch.nn.parallel
-import torch.backends.cudnn as cudnn
+import torch.backends.cudnn as cudnn    #使用GPU
 
 import torch.distributed as dist
 import torch.optim
 import torch.utils.data
-import torch.utils.data.distributed
+import torch.utils.data.distributed     #分布式训练
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
@@ -23,84 +23,81 @@ import os.path as osp
 from torch.autograd import Variable
 import math
 from networks.resnet import resnet50, resnet101
-from dataset.dataset import VeriDataset
-#from dataset.dataset import AicDataset
+from dataset.dataset import VeriDataset # AicDataset
 
-"""
-此文件调用dataset中创建的对象读取数据创建dataloader，然后调用networks中创建的模型对象来创建对应的resnet模型。
-对模型进行一些初始化设置后，根据用户提供的输入信息，对模型进行训练，并把模型训练的结果(model weights)保存在指定文件夹中。
-默认保存路径为：当前目录下checkpoints/att文件夹。
-
-这里用户需要提供2个必要参数：
-- data: 图片文件存储的路径
-- trainlist: txt文件的路径，里面存储training数据中包含的图片的id
-
-剩下的为选择性参数，如果用户不提供，则采用默认值：
-- dataset: 数据集的类型，默认为Veri (Vehicle Re-identification) 数据集
-- workers: 指定workers的数量来处理数据
-- batch_size: 批处理的大小
-- start_epoch: epoch的初始值
-- backbone: 采用什么模型， 默认为resnet50
-- weights： 模型的权重（如果有，则提供该权重的存储路径）
-- scale-size： 模型scale后的大小
-- num_classes: 有多少种labels
-- write-out： 是否保存输出
-- crop_size: 模型裁剪后的大小
-- epochs: 模型要训练的次数
-- save_dir: 模型训练后权重保存的路径
-- num_gpu: 规定用于训练模型的gpu的数量
-"""
-
+#取出torchvision.models中所有集成好的模型名称，并按照升序排列
+#取出model.__dict__中所有对象的名字
+#名字全部小写并且不是以__开头
+#判断对象是否可调用
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
 
-parser = argparse.ArgumentParser(description='PyTorch Relationship')
+'''
+返回 ['alexnet', 'densenet121', 'densenet161', 'densenet169', 
+'densenet201', 'googlenet', 'inception_v3', 'mnasnet0_5', 'mnasnet0_75', 
+'mnasnet1_0', 'mnasnet1_3', 'mobilenet_v2', 'resnet101', 'resnet152', 'resnet18',
+ 'resnet34', 'resnet50', 'resnext101_32x8d', 'resnext50_32x4d', 'shufflenet_v2_x0_5',
+  'shufflenet_v2_x1_0', 'shufflenet_v2_x1_5', 'shufflenet_v2_x2_0', 'squeezenet1_0',
+   'squeezenet1_1', 'vgg11', 'vgg11_bn', 'vgg13', 
+'vgg13_bn', 'vgg16', 'vgg16_bn', 'vgg19', 'vgg19_bn', 'wide_resnet101_2', 'wide_resnet50_2']
+'''
 
-parser.add_argument('data', metavar='DIR', help='path to dataset')
-parser.add_argument('trainlist', metavar='DIR', help='path to test list')
+parser = argparse.ArgumentParser(description='PyTorch Relationship') #命令行解析的主要入口点
+
+parser.add_argument('data', metavar='DIR', help='path to dataset') #数据集的路径
+parser.add_argument('trainlist', metavar='DIR', help='path to test list') #trainlist路径
 parser.add_argument('--dataset',  default='veri', type=str,
-                    help='dataset name veri or aic (default: veri)')
+                    help='dataset name veri or aic (default: veri)')#选择数据集名称
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
-                    help='number of data loading workers (defult: 4)')
+                    help='number of data loading workers (defult: 4)')#用几线程参与运算？没懂
+#定义batchsize
 parser.add_argument('--batch_size', '--batch-size', default=100, type=int, metavar='N',
                     help='mini-batch size (default: 1)')
+#epoch的初始值
 parser.add_argument('--start_epoch',  default=0, type=int, metavar='N',
                     help='mini-batch size (default: 1)')
+#定义骨干网络
 parser.add_argument('--backbone',  default='resnet50', type=str,
                     help='backbone network resnet50 or resnet101 (default: resnet50)')
+#模型权重的存储位置？
 parser.add_argument('--weights', default='', type=str, metavar='PATH',
                     help='path to weights (default: none)')
+#？
 parser.add_argument('--scale-size',default=256, type=int,
                     help='input size')
+#待识别的种类数量
 parser.add_argument('-n', '--num_classes', default=16, type=int, metavar='N',
                     help='number of classes / categories')
+#是否保存输出
 parser.add_argument('--write-out', dest='write_out', action='store_true',
                     help='write scores')
+#这是调整之后的图片尺寸？
 parser.add_argument('--crop_size',default=224, type=int,
                     help='crop size')
 parser.add_argument('--val_step',default=1, type=int,
                     help='val step')
+#模型训练的轮次
 parser.add_argument('--epochs',default=200, type=int,
                     help='epochs')
+#存储模型的路径
 parser.add_argument('--save_dir',default='./checkpoints/att/', type=str,
                     help='save_dir')
+#GPU数量？
 parser.add_argument('--num_gpu', default=4, type=int, metavar='PATH',
                     help='path for saving result (default: none)')
 
 best_prec1 = 0
 
-def get_dataset(dataset_name,data_dir,train_list):
-    """
-    用于初始化一个dataloader对象，来读取dataset中的指定数据。
-    在这个函数中，对原图片根据imagenet图片的statistics进行了正则化处理。并且对图片进行了一些预处理
-    :arg
-        dataset_name: 数据集的类型
-        data_dir: 图片数据存储的路径
-        train_list:: txt文件的路径，里面存储training数据中包含的图片的id
-    :returns
-        data_loader
-    """
+"""函数作用应该是读取数据进行预处理和数据增强
+输入：
+     dataset_name 数据集名字
+     data_dir 数据集路径
+     train_list 训练集的标签数据（每张图片名对应的标签）
+输出：
+     data_loader
+"""
+def get_dataset(dataset_name, data_dir,train_list):
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
     scale_size = args.scale_size
@@ -108,23 +105,25 @@ def get_dataset(dataset_name,data_dir,train_list):
 
     if dataset_name == 'veri':
         train_data_transform = transforms.Compose([
+                transforms.Scale((336,336)),#改变图的尺寸为336×336
+                transforms.RandomHorizontalFlip(),#随机水平翻转，一半的概率翻转，一半的概率不翻转
+                transforms.RandomCrop((crop_size,crop_size)),#随机选取中心点的位置进行切割
+                transforms.ToTensor(),#转换为张量，转换之后数据范围是0-1
+                normalize])  #归一化
+        #得到dataset数据迭代器
+        train_set = VeriDataset(data_dir, train_list, train_data_transform, is_train= True )
+    elif dataset_name == 'aic':
+        train_data_transform = transforms.Compose([
                 transforms.Scale((336,336)),
                 transforms.RandomHorizontalFlip(),
                 transforms.RandomCrop((crop_size,crop_size)),
                 transforms.ToTensor(),
                 normalize])
-        train_set = VeriDataset(data_dir, train_list, train_data_transform, is_train= True )
-    # elif dataset_name == 'aic':
-    #     train_data_transform = transforms.Compose([
-    #             transforms.Scale((336,336)),
-    #             transforms.RandomHorizontalFlip(),
-    #             transforms.RandomCrop((crop_size,crop_size)),
-    #             transforms.ToTensor(),
-    #             normalize])
-    #     train_set = AicDataset(data_dir, train_list, train_data_transform, is_train= True )
+        train_set = AicDataset(data_dir, train_list, train_data_transform, is_train= True )
     else:
         print("!!!dataset error!!!")
         return
+    #生成数据迭代器
     train_loader = DataLoader(dataset=train_set, num_workers=args.workers,
                             batch_size=args.batch_size, shuffle=True)
     
@@ -133,7 +132,7 @@ def get_dataset(dataset_name,data_dir,train_list):
 def main():
     
     global args, best_prec1
-    args = parser.parse_args()
+    args = parser.parse_args() #把命令行的参数转化为具有属性的对象
     print (args)
     best_acc = 0
     # Create dataloader
@@ -142,14 +141,15 @@ def main():
     data_dir = args.data
     train_list = args.trainlist
     dataset_name = args.dataset
-
+    #获得data_loader
     train_loader = get_dataset(dataset_name, data_dir,  train_list)
-    # load network
+    # load network 加载网络
     if args.backbone == 'resnet50':
         model = resnet50(num_classes=args.num_classes)
     elif args.backbone == 'resnet101':    
         model = resnet101(num_classes=args.num_classes)
-    
+
+    # 如果有预训练的权重，则加载权重
     if args.weights != '':
         try:
             ckpt = torch.load(args.weights)
@@ -157,19 +157,21 @@ def main():
             print ('!!!load weights success !! path is ',args.weights)
         except Exception as e:
             model_init(args.weights,model)
-    model = torch.nn.DataParallel(model)
+    model = torch.nn.DataParallel(model) #并行计算
     model.cuda()
-    mkdir_if_missing(args.save_dir)
+    mkdir_if_missing(args.save_dir) #创建保存文件的目录
+    #定义优化器
     optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()),lr = 10e-3 )
+    #定义交叉熵损失函数
     criterion = nn.CrossEntropyLoss().cuda()
-    
+    #GPU加速用的flag，能够优化运行效率？
     cudnn.benchmark = True
 
     for epoch in range(args.start_epoch, args.epochs + 1):
-        # try not adjust learning rate
-        #adjust_lr(optimizer, epoch)
+        #根据训练轮次调整学习率
+        adjust_lr(optimizer, epoch)
         train (train_loader, model, criterion,optimizer, epoch)
-        
+        #训练一定轮次后保存模型去验证
         if epoch% args.val_step == 0:
             save_checkpoint(model,epoch,optimizer)
         '''
@@ -197,12 +199,9 @@ def model_init(weights,model):
     for v ,val in model_pre_dict.items() :
         print ('update',v)
     '''
-    """
-    加载模型保存的权重
-    :arg
-        weights: 模型权重的路径
-        model: 模型对象
-    """
+    '''
+    初始化模型，加载除全连接层以外的权重。
+    '''
     saved_state_dict = torch.load(weights)
     new_params = model.state_dict().copy()
     for i in saved_state_dict:
@@ -215,14 +214,11 @@ def model_init(weights,model):
     model.load_state_dict(new_params)
 
     print ('-------Load Weight',weights)
-
+'''
+定义调整学习率的函数
+学习率调整策略：30为间隔，逐渐变小
+'''
 def adjust_lr(optimizer, ep):
-    """
-    用于随着训练次数的增加来减少学习率
-    :arg
-        optimizer: 用于训练模型的优化器对象
-        ep: epochs
-    """
     if ep < 10:
         lr = 1e-4 * (ep + 1) / 2
     elif ep < 40:
@@ -236,7 +232,8 @@ def adjust_lr(optimizer, ep):
     elif ep < 160:
         lr = 1e-4 
     else:
-        lr = 1e-5 
+        lr = 1e-5
+        #param_groups是optimizer的参数组，以字典的形式管理参数
     for p in optimizer.param_groups:
         p['lr'] = lr
 
@@ -251,6 +248,7 @@ def train(train_loader, model, criterion,optimizer, epoch):
     top5 = AverageMeter()
     end = time.time()
     # switch to train mode
+    #训练模式下，启用BN和Dropout
     model.train()
 
 
@@ -265,9 +263,9 @@ def train(train_loader, model, criterion,optimizer, epoch):
         loss = criterion(output, target)
 
         prec1= accuracy(output, target, topk=(1,5 ))
-        losses.update(loss.item(), image.size(0))
-        top1.update(prec1[0], image.size(0))
-        top5.update(prec1[1], image.size(0))
+        losses.update(loss.item(), image.size(0)) #每一轮训练的平均损失
+        top1.update(prec1[0], image.size(0))  #top1的平均准确度
+        top5.update(prec1[1], image.size(0)) #top5的平均准确度
 
 
         # compute gradient and do SGD step
@@ -379,11 +377,8 @@ def validate(val_loader, model, criterion):
           .format(top1=top1, classaccuracys = classaccuracys, loss=losses)))
 
     return top1.avg[0]
-
+#保存相应epoch的模型
 def save_checkpoint(model,epoch,optimizer):
-    """
-    保存训练后的模型
-    """
     state = {
         'epoch': epoch,
         'state_dict': model.state_dict(),
@@ -391,11 +386,12 @@ def save_checkpoint(model,epoch,optimizer):
     }
     filepath =  osp.join(args.save_dir, 'Car_epoch_' + str(epoch) + '.pth')
     torch.save(state, filepath)
-
+#判断是否存在相应目录，不存在就创建一个
 def mkdir_if_missing(dir_path):
     if not os.path.exists(dir_path):
         os.makedirs(dir_path)
 
+#返回一个batch里面的topk准确率
 def accuracy(output, target, topk=(1,)):
     maxk = max(topk)
     batch_size = target.size(0)
@@ -410,6 +406,9 @@ def accuracy(output, target, topk=(1,)):
         res.append(correct_k.mul_(100.0 / batch_size))
     return res
 
+'''
+定义AverageMeter对象，返回平均值avg
+'''
 class AverageMeter(object):
     def __init__(self):
         self.reset()
